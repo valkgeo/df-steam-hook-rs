@@ -23,6 +23,7 @@ static_init = "1.0.4"
 dlopen2 = "0.8.0"
 anyhow = "1.0.100"
 device_query = "3.0.1"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 exe = "0.5.6"

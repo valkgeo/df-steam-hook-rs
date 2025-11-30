@@ -1,6 +1,10 @@
 use anyhow::Result;
 use retour::static_detour;
+use rusqlite::Connection;
 use std::ffi::c_char;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 
 use crate::config::CONFIG;
 use crate::cxxstring::CxxString;
@@ -19,6 +23,55 @@ static ENABLER: usize = unsafe {
     false => 0 as usize,
   }
 };
+
+fn data_dir() -> PathBuf {
+  std::env::current_dir().unwrap().join("df-ptbr-llm-mod").join("data")
+}
+
+fn llm_cache_lookup(original: &str) -> Option<String> {
+  let db_path = data_dir().join("cache.db");
+  let conn = Connection::open(db_path).ok()?;
+  let mut statement = conn.prepare("SELECT dst FROM translations WHERE src = ?").ok()?;
+  let mut rows = statement.query([original]).ok()?;
+  match rows.next().ok()? {
+    Some(row) => row.get(0).ok(),
+    None => None,
+  }
+}
+
+fn enqueue_for_translation(original: &str) {
+  if original.is_empty() {
+    return;
+  }
+  let pending_path = data_dir().join("pending.txt");
+  if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(pending_path) {
+    let _ = writeln!(file, "{original}");
+  }
+}
+
+fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
+  if let Some(translate) = DICTIONARY.get(original) {
+    return Some(translate.clone());
+  }
+
+  let original_str = match std::str::from_utf8(original) {
+    Ok(value) => value.trim_end_matches('\0'),
+    Err(_) => return None,
+  };
+
+  if original_str.is_empty() {
+    return None;
+  }
+
+  if let Some(cached) = llm_cache_lookup(original_str) {
+    let mut bytes = cached.into_bytes();
+    bytes.push(0);
+    return Some(bytes);
+  }
+
+  enqueue_for_translation(original_str);
+  None
+}
 
 pub unsafe fn attach_all() -> Result<()> {
   if CONFIG.settings.enable_translation {
@@ -103,9 +156,9 @@ pub unsafe fn disable_all() -> Result<()> {
 fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match DICTIONARY.get(value) {
+      (value, true) => match translate_bytes(value) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
         }
         _ => original!(dst, src, size),
@@ -120,9 +173,9 @@ fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
 fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match DICTIONARY.get(value) {
+      (value, true) => match translate_bytes(value) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
         }
         _ => original!(dst, src, size),
@@ -137,9 +190,9 @@ fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char
 fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match DICTIONARY.get(value) {
+      (value, true) => match translate_bytes(value) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
         }
         _ => original!(dst, src, size),
@@ -154,9 +207,9 @@ fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
 fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match DICTIONARY.get(value) {
+      (value) => match translate_bytes(value) {
         Some(translate) => {
-          let (ptr, _, _) = translate.to_owned().into_raw_parts();
+          let (ptr, _, _) = translate.into_raw_parts();
           original!(dst, ptr)
         }
         _ => original!(dst, src),
@@ -171,9 +224,9 @@ fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
 fn std_string_assign(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match DICTIONARY.get(value) {
+      (value) => match translate_bytes(value) {
         Some(translate) => {
-          let (ptr, _, _) = translate.to_owned().into_raw_parts();
+          let (ptr, _, _) = translate.into_raw_parts();
           original!(dst, ptr)
         }
         _ => original!(dst, src),
@@ -189,9 +242,9 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match DICTIONARY.get(converted) {
+      converted => match translate_bytes(converted) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
           #[cfg(target_os = "linux")]
           {
@@ -214,9 +267,9 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match DICTIONARY.get(converted) {
+      converted => match translate_bytes(converted) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
           #[cfg(target_os = "linux")]
           {
@@ -239,9 +292,9 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match DICTIONARY.get(converted) {
+      converted => match translate_bytes(converted) {
         Some(translate) => {
-          let (ptr, len, _) = translate.to_owned().into_raw_parts();
+          let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
           #[cfg(target_os = "linux")]
           {
