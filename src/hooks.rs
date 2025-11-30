@@ -48,6 +48,54 @@ struct OllamaResponse {
   message: OllamaMessage,
 }
 
+fn is_translatable_line(s: &str) -> bool {
+  let text = s.trim();
+  if text.is_empty() {
+    return false;
+  }
+
+  let len = text.chars().count();
+  if len < 3 || len > 80 {
+    return false;
+  }
+
+  let has_lower = text.chars().any(|c| c.is_ascii_lowercase());
+  if !has_lower {
+    return false;
+  }
+
+  let lower = text.to_ascii_lowercase();
+  const EXT_SKIP: [&str; 6] = [".ogg", ".mp3", ".wav", ".txt", ".png", ".xml"];
+  if lower.starts_with("data/") || lower.starts_with("data\\") || lower.contains('/') || lower.contains('\\') {
+    return false;
+  }
+  if EXT_SKIP.iter().any(|ext| lower.ends_with(ext)) {
+    return false;
+  }
+
+  if text.starts_with('[') || text.ends_with(']') {
+    return false;
+  }
+
+  if text.starts_with("String: Character") {
+    return false;
+  }
+
+  const TECH_PREFIXES: [&str; 3] = ["Custom: ", "Main: ", "Arena: "];
+  if TECH_PREFIXES.iter().any(|p| text.starts_with(p)) {
+    return false;
+  }
+
+  let capsish = text
+    .chars()
+    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' || c == ' ' || c == ':' || c == '+' || c == '-');
+  if capsish && !text.chars().any(|c| c.is_ascii_lowercase()) {
+    return false;
+  }
+
+  true
+}
+
 fn data_dir() -> PathBuf {
   std::env::current_dir().unwrap().join("df-ptbr-llm-mod").join("data")
 }
@@ -78,37 +126,35 @@ fn llm_cache_store(original: &str, translated: &str) {
 }
 
 fn try_llm_sync(original: &str) -> Option<String> {
-    // DEBUG: desabilitado temporariamente
-    let _ = original; // evita warning de variável não usada
-    None
+  let _ = original;
+  None
 }
+
 
 
 fn enqueue_for_translation(original: &str) {
-    let original = original.trim();
-    if original.is_empty() {
-        return;
-    }
+  let original = original.trim();
+  if original.is_empty() {
+    return;
+  }
 
-    // Só enfileira na primeira vez que essa string aparecer na sessão
-    {
-        let mut seen = SEEN_PENDING.lock().unwrap();
-        if !seen.insert(original.to_string()) {
-            // Já vimos essa string antes, não grava de novo
-            return;
-        }
-    }
+  if !is_translatable_line(original) {
+    return;
+  }
 
-    let pending = data_dir().join("pending.txt");
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(pending)
-    {
-        let _ = writeln!(f, "{original}");
+  // Only enqueue the first time we see this string in this run
+  {
+    let mut seen = SEEN_PENDING.lock().unwrap();
+    if !seen.insert(original.to_string()) {
+      return;
     }
+  }
+
+  let pending = data_dir().join("pending.txt");
+  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(pending) {
+    let _ = writeln!(f, "{original}");
+  }
 }
-
 
 fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
   debug_log("translate_bytes called");
@@ -128,6 +174,10 @@ fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
   };
 
   if original_str.is_empty() {
+    return None;
+  }
+
+  if !is_translatable_line(original_str) {
     return None;
   }
 
