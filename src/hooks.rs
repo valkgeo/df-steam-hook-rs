@@ -1,10 +1,13 @@
 use anyhow::Result;
 use retour::static_detour;
+use once_cell::sync::Lazy;
 use rusqlite::Connection;
 use std::ffi::c_char;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::config::CONFIG;
 use crate::cxxstring::CxxString;
@@ -30,6 +33,8 @@ static ENABLER: usize = unsafe {
   }
 };
 
+static SEEN_PENDING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
 fn data_dir() -> PathBuf {
   std::env::current_dir().unwrap().join("df-ptbr-llm-mod").join("data")
 }
@@ -49,9 +54,19 @@ fn enqueue_for_translation(original: &str) {
   if original.is_empty() {
     return;
   }
-  let pending_path = data_dir().join("pending.txt");
-  if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(pending_path) {
-    let _ = writeln!(file, "{original}");
+
+  // Only enqueue the first time we see this string during this run
+  {
+    let mut seen = SEEN_PENDING.lock().unwrap();
+    if !seen.insert(original.to_string()) {
+      // Already enqueued earlier in this session, do not write again
+      return;
+    }
+  }
+
+  let pending = data_dir().join("pending.txt");
+  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(pending) {
+    let _ = writeln!(f, "{original}");
   }
 }
 
