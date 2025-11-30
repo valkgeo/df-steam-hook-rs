@@ -13,6 +13,12 @@ use crate::utils;
 
 use r#macro::hook;
 
+fn debug_log(msg: &str) {
+  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open("dfint_debug_log.txt") {
+    let _ = writeln!(f, "{msg}");
+  }
+}
+
 #[cfg(target_os = "linux")]
 #[static_init::dynamic]
 static ENABLER: usize = unsafe {
@@ -50,26 +56,23 @@ fn enqueue_for_translation(original: &str) {
 }
 
 fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
-  if let Some(translate) = DICTIONARY.get(original) {
-    return Some(translate.clone());
-  }
+  debug_log("translate_bytes called");
 
   let original_str = match std::str::from_utf8(original) {
     Ok(value) => value.trim_end_matches('\0'),
-    Err(_) => return None,
+    Err(_) => {
+      debug_log("invalid UTF-8");
+      return None;
+    }
   };
 
   if original_str.is_empty() {
     return None;
   }
 
-  if let Some(cached) = llm_cache_lookup(original_str) {
-    let mut bytes = cached.into_bytes();
-    bytes.push(0);
-    return Some(bytes);
-  }
-
+  debug_log(&format!("enqueue: {original_str}"));
   enqueue_for_translation(original_str);
+
   None
 }
 
