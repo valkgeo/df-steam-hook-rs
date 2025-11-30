@@ -51,24 +51,30 @@ fn llm_cache_lookup(original: &str) -> Option<String> {
 }
 
 fn enqueue_for_translation(original: &str) {
-  if original.is_empty() {
-    return;
-  }
-
-  // Only enqueue the first time we see this string during this run
-  {
-    let mut seen = SEEN_PENDING.lock().unwrap();
-    if !seen.insert(original.to_string()) {
-      // Already enqueued earlier in this session, do not write again
-      return;
+    let original = original.trim();
+    if original.is_empty() {
+        return;
     }
-  }
 
-  let pending = data_dir().join("pending.txt");
-  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(pending) {
-    let _ = writeln!(f, "{original}");
-  }
+    // Só enfileira na primeira vez que essa string aparecer na sessão
+    {
+        let mut seen = SEEN_PENDING.lock().unwrap();
+        if !seen.insert(original.to_string()) {
+            // Já vimos essa string antes, não grava de novo
+            return;
+        }
+    }
+
+    let pending = data_dir().join("pending.txt");
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(pending)
+    {
+        let _ = writeln!(f, "{original}");
+    }
 }
+
 
 fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
   debug_log("translate_bytes called");
