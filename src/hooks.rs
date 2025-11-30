@@ -1,13 +1,15 @@
 use anyhow::Result;
 use retour::static_detour;
+use std::collections::HashSet;
 use once_cell::sync::Lazy;
 use rusqlite::Connection;
+use serde::Deserialize;
 use std::ffi::c_char;
-use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::config::CONFIG;
 use crate::cxxstring::CxxString;
@@ -35,6 +37,17 @@ static ENABLER: usize = unsafe {
 
 static SEEN_PENDING: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+#[derive(Debug, Deserialize)]
+struct OllamaMessage {
+  role: String,
+  content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaResponse {
+  message: OllamaMessage,
+}
+
 fn data_dir() -> PathBuf {
   std::env::current_dir().unwrap().join("df-ptbr-llm-mod").join("data")
 }
@@ -47,6 +60,62 @@ fn llm_cache_lookup(original: &str) -> Option<String> {
   match rows.next().ok()? {
     Some(row) => row.get(0).ok(),
     None => None,
+  }
+}
+
+fn llm_cache_store(original: &str, translated: &str) {
+  let db_path = data_dir().join("cache.db");
+  if let Ok(conn) = Connection::open(db_path) {
+    let _ = conn.execute(
+      "CREATE TABLE IF NOT EXISTS translations (src TEXT PRIMARY KEY, dst TEXT NOT NULL)",
+      [],
+    );
+    let _ = conn.execute(
+      "INSERT OR REPLACE INTO translations (src, dst) VALUES (?1, ?2)",
+      (original, translated),
+    );
+  }
+}
+
+fn try_llm_sync(original: &str) -> Option<String> {
+  if original.is_empty() || original.contains('\n') || original.chars().count() > 40 {
+    return None;
+  }
+
+  let agent = ureq::AgentBuilder::new()
+    .timeout(Duration::from_millis(150))
+    .build();
+
+  let body = ureq::json!({
+    "model": "qwen2.5:3b",
+    "stream": false,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a professional translator. Translate Dwarf Fortress UI/game text from English to Brazilian Portuguese (pt-BR). Use natural Brazilian Portuguese, preserve names of dwarves, places, items and deities, preserve formatting, and avoid literal translations that sound unnatural."
+      },
+      {
+        "role": "user",
+        "content": original
+      }
+    ]
+  });
+
+  let resp = match agent.post("http://localhost:11434/api/chat").send_json(body) {
+    Ok(r) => r,
+    Err(_) => return None,
+  };
+
+  let parsed: OllamaResponse = match resp.into_json() {
+    Ok(v) => v,
+    Err(_) => return None,
+  };
+
+  let translated = parsed.message.content.trim();
+  if translated.is_empty() {
+    None
+  } else {
+    Some(translated.to_string())
   }
 }
 
@@ -79,6 +148,12 @@ fn enqueue_for_translation(original: &str) {
 fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
   debug_log("translate_bytes called");
 
+  // 1) CSV dictionary lookup
+  if let Some(translate) = DICTIONARY.get(original) {
+    return Some(translate.clone());
+  }
+
+  // 2) Normalize to &str
   let original_str = match std::str::from_utf8(original) {
     Ok(value) => value.trim_end_matches('\0'),
     Err(_) => {
@@ -91,6 +166,22 @@ fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
     return None;
   }
 
+  // 3) Cache lookup (SQLite)
+  if let Some(cached) = llm_cache_lookup(original_str) {
+    let mut bytes = cached.into_bytes();
+    bytes.push(0);
+    return Some(bytes);
+  }
+
+  // 4) Fast path: try synchronous LLM for short/simple strings
+  if let Some(llm_translated) = try_llm_sync(original_str) {
+    llm_cache_store(original_str, &llm_translated);
+    let mut bytes = llm_translated.into_bytes();
+    bytes.push(0);
+    return Some(bytes);
+  }
+
+  // 5) Fallback: enqueue for offline translation
   debug_log(&format!("enqueue: {original_str}"));
   enqueue_for_translation(original_str);
 
