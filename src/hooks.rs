@@ -78,46 +78,11 @@ fn llm_cache_store(original: &str, translated: &str) {
 }
 
 fn try_llm_sync(original: &str) -> Option<String> {
-  if original.is_empty() || original.contains('\n') || original.chars().count() > 40 {
-    return None;
-  }
-
-  let agent = ureq::AgentBuilder::new()
-    .timeout(Duration::from_millis(150))
-    .build();
-
-  let body = ureq::json!({
-    "model": "qwen2.5:3b",
-    "stream": false,
-    "messages": [
-      {
-        "role": "system",
-        "content": "You are a professional translator. Translate Dwarf Fortress UI/game text from English to Brazilian Portuguese (pt-BR). Use natural Brazilian Portuguese, preserve names of dwarves, places, items and deities, preserve formatting, and avoid literal translations that sound unnatural."
-      },
-      {
-        "role": "user",
-        "content": original
-      }
-    ]
-  });
-
-  let resp = match agent.post("http://localhost:11434/api/chat").send_json(body) {
-    Ok(r) => r,
-    Err(_) => return None,
-  };
-
-  let parsed: OllamaResponse = match resp.into_json() {
-    Ok(v) => v,
-    Err(_) => return None,
-  };
-
-  let translated = parsed.message.content.trim();
-  if translated.is_empty() {
+    // DEBUG: desabilitado temporariamente
+    let _ = original; // evita warning de variável não usada
     None
-  } else {
-    Some(translated.to_string())
-  }
 }
+
 
 fn enqueue_for_translation(original: &str) {
     let original = original.trim();
