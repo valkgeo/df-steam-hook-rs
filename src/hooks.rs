@@ -9,7 +9,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use crate::config::CONFIG;
 use crate::cxxstring::CxxString;
@@ -77,6 +76,42 @@ fn is_translatable_line(s: &str) -> bool {
     return false;
   }
 
+  // skip obvious raw/template identifiers
+  const RAW_PREFIXES: [&str; 13] = [
+    "vanilla_",
+    "material_template_",
+    "inorganic_",
+    "plant_",
+    "item_",
+    "building_",
+    "body_",
+    "creature_",
+    "entity_",
+    "reaction_",
+    "interaction_",
+    "language_",
+    "text_",
+  ];
+  if RAW_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+    return false;
+  }
+
+  // skip single-token lowercase identifiers (language tokens, etc.)
+  if !text.contains(' ')
+    && text
+      .chars()
+      .all(|c| c.is_ascii_lowercase())
+    && len <= 20
+  {
+    return false;
+  }
+
+  // skip known boilerplate labels
+  const SKIP_LIST: [&str; 3] = ["vanilla text", "bay 12 games", "various text strings used by the game."];
+  if SKIP_LIST.iter().any(|v| lower == *v) {
+    return false;
+  }
+
   if text.starts_with("String: Character") {
     return false;
   }
@@ -97,7 +132,13 @@ fn is_translatable_line(s: &str) -> bool {
 }
 
 fn data_dir() -> PathBuf {
-  std::env::current_dir().unwrap().join("df-ptbr-llm-mod").join("data")
+  let base = std::env::current_exe()
+    .ok()
+    .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+    .or_else(|| std::env::current_dir().ok())
+    .unwrap_or_else(|| PathBuf::from("."));
+
+  base.join("df-ptbr-llm-mod").join("data")
 }
 
 fn llm_cache_lookup(original: &str) -> Option<String> {
@@ -130,33 +171,12 @@ fn try_llm_sync(original: &str) -> Option<String> {
   None
 }
 
-
-
-fn enqueue_for_translation(original: &str) {
-  let original = original.trim();
-  if original.is_empty() {
-    return;
-  }
-
-  if !is_translatable_line(original) {
-    return;
-  }
-
-  // Only enqueue the first time we see this string in this run
-  {
-    let mut seen = SEEN_PENDING.lock().unwrap();
-    if !seen.insert(original.to_string()) {
-      return;
-    }
-  }
-
-  let pending = data_dir().join("pending.txt");
-  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(pending) {
-    let _ = writeln!(f, "{original}");
-  }
+fn translate_bytes_raw(original: &[u8]) -> Option<Vec<u8>> {
+  // Only dictionary for raw/generic strings
+  DICTIONARY.get(original).cloned()
 }
 
-fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
+fn translate_bytes_ui(original: &[u8]) -> Option<Vec<u8>> {
   debug_log("translate_bytes called");
 
   // 1) CSV dictionary lookup
@@ -188,7 +208,7 @@ fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
     return Some(bytes);
   }
 
-  // 4) Fast path: try synchronous LLM for short/simple strings
+  // 4) Fast path: try synchronous LLM for short/simple strings (currently stubbed)
   if let Some(llm_translated) = try_llm_sync(original_str) {
     llm_cache_store(original_str, &llm_translated);
     let mut bytes = llm_translated.into_bytes();
@@ -201,6 +221,32 @@ fn translate_bytes(original: &[u8]) -> Option<Vec<u8>> {
   enqueue_for_translation(original_str);
 
   None
+}
+
+
+
+fn enqueue_for_translation(original: &str) {
+  let original = original.trim();
+  if original.is_empty() {
+    return;
+  }
+
+  if !is_translatable_line(original) {
+    return;
+  }
+
+  // Only enqueue the first time we see this string in this run
+  {
+    let mut seen = SEEN_PENDING.lock().unwrap();
+    if !seen.insert(original.to_string()) {
+      return;
+    }
+  }
+
+  let pending = data_dir().join("pending.txt");
+  if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(pending) {
+    let _ = writeln!(f, "{original}");
+  }
 }
 
 pub unsafe fn attach_all() -> Result<()> {
@@ -286,7 +332,7 @@ pub unsafe fn disable_all() -> Result<()> {
 fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match translate_bytes(value) {
+      (value, true) => match translate_bytes_raw(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -303,7 +349,7 @@ fn string_copy_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
 fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match translate_bytes(value) {
+      (value, true) => match translate_bytes_raw(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -320,7 +366,7 @@ fn string_append_n(dst: *mut c_char, src: *const u8, size: usize) -> *mut c_char
 fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
   unsafe {
     match (std::slice::from_raw_parts(src, size), size > 1) {
-      (value, true) => match translate_bytes(value) {
+      (value, true) => match translate_bytes_raw(value) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           original!(dst, ptr, len - 1)
@@ -337,7 +383,7 @@ fn std_string_ctor(dst: *const u8, src: *const u8, size: usize) -> *const u8 {
 fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match translate_bytes(value) {
+      (value) => match translate_bytes_raw(value) {
         Some(translate) => {
           let (ptr, _, _) = translate.into_raw_parts();
           original!(dst, ptr)
@@ -354,7 +400,7 @@ fn std_string_append(dst: *const u8, src: *const u8) -> *const u8 {
 fn std_string_assign(dst: *const u8, src: *const u8) -> *const u8 {
   unsafe {
     match std::ffi::CStr::from_ptr(src as *const c_char).to_bytes() {
-      (value) => match translate_bytes(value) {
+      (value) => match translate_bytes_raw(value) {
         Some(translate) => {
           let (ptr, _, _) = translate.into_raw_parts();
           original!(dst, ptr)
@@ -372,7 +418,7 @@ fn addst(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match translate_bytes(converted) {
+      converted => match translate_bytes_ui(converted) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
@@ -397,7 +443,7 @@ fn addst_top(gps: usize, src: *const u8, justify: u8, space: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match translate_bytes(converted) {
+      converted => match translate_bytes_ui(converted) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
@@ -422,7 +468,7 @@ fn addst_flag(gps: usize, src: *const u8, a3: usize, a4: usize, flag: u32) {
   unsafe {
     let s = CxxString::from_ptr(src);
     match s.to_bytes_without_nul() {
-      converted => match translate_bytes(converted) {
+      converted => match translate_bytes_ui(converted) {
         Some(translate) => {
           let (ptr, len, _) = translate.into_raw_parts();
           let mut cxxstr = CxxString::new(ptr, len - 1);
